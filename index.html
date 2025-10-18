@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>NeuroLing • DFLS Mobile MVP</title>
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          boxShadow: {
+            neon: "0 0 30px rgba(56,189,248,0.35)",
+            neon2: "0 0 30px rgba(251,191,36,0.35)",
+            neon3: "0 0 30px rgba(34,197,94,0.35)",
+          },
+          keyframes: {
+            floaty: { '0%': { transform: 'translateY(0)' }, '50%': { transform: 'translateY(-3px)' }, '100%': { transform: 'translateY(0)' } },
+            pulseSoft: { '0%,100%': { opacity: .85 }, '50%': { opacity: 1 } },
+          },
+          animation: {
+            floaty: 'floaty 2.5s ease-in-out infinite',
+            pulseSoft: 'pulseSoft 2.2s ease-in-out infinite',
+          }
+        }
+      }
+    }
+  </script>
+  <!-- React + ReactDOM + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    html,body{height:100%;}
+    *{touch-action:manipulation}
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 selection:bg-cyan-500/40">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    // ---------- Utils ----------
+    const STORAGE_KEY = 'neuroling.cards.v1';
+    const SETTINGS_KEY = 'neuroling.settings.v1';
+    const STATS_KEY = 'neuroling.stats.v1';
+    const INTERVALS_DAYS = [0, 1, 3, 7, 16, 35];
+
+    const THEMES = {
+      focus: { bg: 'bg-slate-950', panel: 'bg-slate-900/70', text: 'text-slate-100', accentFrom: 'from-sky-500', accentTo:'to-cyan-400', glow:'shadow-neon' },
+      evening: { bg: 'bg-zinc-950', panel: 'bg-zinc-900/70', text: 'text-zinc-100', accentFrom: 'from-amber-500', accentTo:'to-rose-500', glow:'shadow-neon2' },
+      energy: { bg: 'bg-neutral-950', panel: 'bg-neutral-900/70', text: 'text-neutral-100', accentFrom: 'from-lime-500', accentTo:'to-emerald-500', glow:'shadow-neon3' },
+    };
+
+    const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+    const daysToMs = (d) => d*24*60*60*1000;
+    const now = () => Date.now();
+    const clamp = (n,min,max)=>Math.max(min,Math.min(max,n));
+    const scheduleNext = (deck)=> now() + daysToMs(INTERVALS_DAYS[clamp(deck,0,INTERVALS_DAYS.length-1)]);
+    const saveJSON = (k,v)=>localStorage.setItem(k,JSON.stringify(v));
+    const loadJSON = (k,f)=>{try{const r=localStorage.getItem(k);return r?JSON.parse(r):f}catch(e){return f}};
+
+    function playTone({ freq=880, duration=0.12, type='sine', volume=0.2 }={}){
+      const C = window.AudioContext || window.webkitAudioContext; if(!C) return;
+      const ctx = new C(); const o=ctx.createOscillator(); const g=ctx.createGain();
+      o.type=type; o.frequency.value=freq; o.connect(g); g.connect(ctx.destination); g.gain.value=volume; o.start();
+      setTimeout(()=>{ g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime+0.05); o.stop(ctx.currentTime+0.05)}, duration*1000);
+    }
+    function successFX({ soundEnabled, vibrationEnabled }){
+      if(soundEnabled){ playTone({freq:1200,duration:0.07,type:'square',volume:.15}); setTimeout(()=>playTone({freq:1800,duration:0.06,type:'triangle',volume:.12}),60)}
+      if(vibrationEnabled && navigator.vibrate) navigator.vibrate(30);
+    }
+    function failFX({ soundEnabled, vibrationEnabled }){
+      if(soundEnabled){ playTone({freq:140,duration:.2,type:'triangle',volume:.1}); }
+      if(vibrationEnabled && navigator.vibrate) navigator.vibrate([20,30,20]);
+    }
+    function ttsSpeak(text, lang='de-DE'){
+      if(!('speechSynthesis' in window)) return; const u=new SpeechSynthesisUtterance(text); u.lang=lang; u.rate=1; u.pitch=1; speechSynthesis.speak(u);
+    }
+
+    function useSpeechRecognition({ lang='de-DE', onResult }){
+      const [supported,setSupported]=useState(false); const recRef=useRef(null);
+      useEffect(()=>{
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition; if(!SR) return;
+        setSupported(true); const rec=new SR(); rec.lang=lang; rec.interimResults=false; rec.maxAlternatives=1;
+        rec.onresult=(e)=>{const txt=e.results?.[0]?.[0]?.transcript; if(txt&&onResult) onResult(txt)}; recRef.current=rec;
+      },[lang,onResult]);
+      return { supported, start:()=>recRef.current?.start(), stop:()=>recRef.current?.stop() };
+    }
+
+    // ---------- Hooks ----------
+    function useCards(){ const [cards,setCards]=useState(loadJSON(STORAGE_KEY,[])); useEffect(()=>saveJSON(STORAGE_KEY,cards),[cards]); return [cards,setCards]; }
+    function useSettings(){ const [s,setS]=useState(loadJSON(SETTINGS_KEY,{dailyTarget:30,theme:'focus',soundEnabled:true,vibrationEnabled:true,surprisesEnabled:true,language:'de-DE'})); useEffect(()=>saveJSON(SETTINGS_KEY,s),[s]); return [s,setS]; }
+    function useStats(){ const [st,setSt]=useState(loadJSON(STATS_KEY,{lastReset:new Date().toDateString(),learnedToday:0,reviewedToday:0})); useEffect(()=>saveJSON(STATS_KEY,st),[st]); useEffect(()=>{const id=setInterval(()=>{const t=new Date().toDateString(); if(st.lastReset!==t) setSt({lastReset:t,learnedToday:0,reviewedToday:0});},60000); return ()=>clearInterval(id)},[st.lastReset]); return [st,setSt]; }
+
+    // ---------- UI ----------
+    const Icon = ({label}) => <span className="inline-block align-[-2px]">{label}</span>;
+
+    function Header({ settings, setSettings }){
+      const theme = THEMES[settings.theme];
+      const cycleTheme = ()=>{
+        const order=['focus','evening','energy'];
+        const idx = order.indexOf(settings.theme); setSettings({...settings, theme: order[(idx+1)%order.length]});
+      };
+      return (
+        <div className={\`sticky top-0 z-30 \${theme.panel} backdrop-blur border-b border-white/10\`}>
+          <div className="max-w-5xl mx-auto px-3 sm:px-4 py-2.5 flex items-center gap-3">
+            <div className={\`p-2 rounded-2xl bg-gradient-to-br \${theme.accentFrom} \${theme.accentTo} \${theme.glow} animate-pulseSoft\`}>
+              <Icon label="🧠" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-bold text-base sm:text-lg truncate">NeuroLing <span className="opacity-60">DFLS</span></div>
+              <div className="text-[11px] sm:text-xs opacity-60">Каждое выученное слово оживляет мир</div>
+            </div>
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <button onClick={cycleTheme} className="px-2 py-1.5 sm:px-3 sm:py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-sm active:scale-[.98]">🎛️ Тема</button>
+              <SoundToggles settings={settings} setSettings={setSettings} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function SoundToggles({ settings, setSettings }){
+      return (
+        <div className="flex items-center gap-1.5">
+          <button onClick={()=>setSettings({...settings, soundEnabled:!settings.soundEnabled})} className={\`px-2 py-1.5 rounded-xl border border-white/10 \${settings.soundEnabled?'bg-white/10':'bg-white/5'} active:scale-[.98]\`} title="Звук">🔊</button>
+          <button onClick={()=>setSettings({...settings, vibrationEnabled:!settings.vibrationEnabled})} className={\`px-2 py-1.5 rounded-xl border border-white/10 \${settings.vibrationEnabled?'bg-white/10':'bg-white/5'} active:scale-[.98]\`} title="Вибро">✨</button>
+        </div>
+      )
+    }
+
+    const mascotLines = {
+      thirsty: [
+        'Помоги мне дойти до реки — выучи 5 слов 🌊',
+        'Ещё пару слов — и я найду воду!',
+        'Каждое слово — как глоток силы.'
+      ],
+      praise: [
+        'Это слово знают всего 10% пользователей.',
+        'Мир заметил твою точность ✨',
+        'Как сталь после удара — ты крепнеешь.'
+      ],
+      idle: [
+        'Я рядом. Давай выберем следующее слово?',
+        'Слова скучают по вниманию…',
+        'Время для маленькой победы.'
+      ],
+    };
+
+    function Mascot({ settings, stats }){
+      const theme = THEMES[settings.theme];
+      const pct = clamp(Math.round((stats.learnedToday / settings.dailyTarget) * 100), 0, 100);
+      const mood = pct>=100 ? 'praise' : pct<40 ? 'thirsty' : 'idle';
+      const [line,setLine] = useState('Я рядом. Давай начнём?');
+      useEffect(()=>{
+        const arr = mascotLines[mood]; setLine(arr[Math.floor(Math.random()*arr.length)]);
+      },[mood, stats.learnedToday]);
+      return (
+        <div className={\`rounded-2xl p-4 border border-white/10 \${theme.panel} \${theme.glow}\`}>
+          <div className="flex items-center gap-3">
+            <div className={\`p-3 rounded-2xl bg-gradient-to-br \${theme.accentFrom} \${theme.accentTo} animate-floaty\`}><span className="text-lg">✨</span></div>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs opacity-80">Маскот</div>
+              <div className="font-semibold text-sm sm:text-base truncate">{line}</div>
+            </div>
+            <div className="text-[11px] opacity-70 whitespace-nowrap">Цель: {stats.learnedToday}/{settings.dailyTarget}</div>
+          </div>
+          <div className="mt-3 h-3 rounded-full bg-white/5 overflow-hidden">
+            <div className={\`h-full bg-gradient-to-r \${theme.accentFrom} \${theme.accentTo}\`} style={{ width: pct+'%' }}></div>
+          </div>
+        </div>
+      );
+    }
+
+    function NeuralMap({ settings, cards }){
+      const theme = THEMES[settings.theme];
+      const { grid } = useMemo(()=>{
+        const W=8, H=6; const grid = Array.from({length:W*H}).map((_,i)=>({x:i%W,y:Math.floor(i/W),intensity:.08}));
+        cards.slice(0,W*H).forEach((c,idx)=>{ grid[idx].intensity = clamp((c.strength||0)/100, .08, 1) });
+        return { grid };
+      },[cards]);
+      return (
+        <div className={\`rounded-2xl p-4 border border-white/10 \${theme.panel}\`}>
+          <div className="flex items-center gap-2 mb-3">
+            <span>🧠</span>
+            <div className="font-semibold">Нейросеть памяти</div>
+          </div>
+          <div className="grid grid-cols-8 sm:grid-cols-12 gap-2">
+            {grid.map((n,i)=> (
+              <div key={i} className={\`aspect-square rounded-xl bg-gradient-to-br \${THEMES[settings.theme].accentFrom} \${THEMES[settings.theme].accentTo}\`} style={{ filter:\`brightness(\${0.5+n.intensity*.8})\`, boxShadow:\`0 0 \${10+n.intensity*30}px rgba(255,255,255,\${.06+n.intensity*.2})\`, transform:\`scale(\${0.9+n.intensity*.3})\`, transition:'all .6s ease' }} />
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function ImportExport({ onImport }){
+      const exportJSON=()=>{ const raw=localStorage.getItem(STORAGE_KEY)||'[]'; const blob=new Blob([raw],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=\`neuroling_cards_\${new Date().toISOString().slice(0,10)}.json\`; a.click(); URL.revokeObjectURL(url); };
+      const importJSON=(e)=>{ const file=e.target.files?.[0]; if(!file) return; const reader=new FileReader(); reader.onload=()=>{ try{ const arr=JSON.parse(String(reader.result)); if(Array.isArray(arr)){ arr.forEach(c=>onImport({term:c.term, translation:c.translation, example:c.example})) } }catch(err){} }; reader.readAsText(file); };
+      return (
+        <div className="flex items-center gap-2">
+          <button onClick={exportJSON} className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 text-sm active:scale-[.98]">⬇️ Экспорт</button>
+          <label className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 text-sm active:scale-[.98]">
+            ⬆️ Импорт
+            <input type="file" accept="application/json" className="hidden" onChange={importJSON} />
+          </label>
+        </div>
+      )
+    }
+
+    function CardCreator({ settings, onAdd }){
+      const theme = THEMES[settings.theme];
+      const [term,setTerm]=useState(''); const [translation,setTranslation]=useState(''); const [example,setExample]=useState(''); const [listPaste,setListPaste]=useState('');
+      const rec = useSpeechRecognition({ lang: settings.language, onResult: (txt)=> setTerm(p=> (p? p+' ' : '') + txt) });
+      const add=()=>{ if(!term.trim()||!translation.trim()) return; onAdd({term:term.trim(),translation:translation.trim(),example:example.trim()||undefined}); setTerm(''); setTranslation(''); setExample(''); };
+      const bulkAdd=()=>{ const lines=listPaste.split(/\n+/).map(l=>l.trim()).filter(Boolean); lines.forEach(line=>{ const [lhs,rhs]=line.split(/\s+[-–—:]\s+/); if(!lhs||!rhs) return; const [tr,ex]=rhs.split('|'); onAdd({term:lhs.trim(),translation:(tr||'').trim(),example:(ex||'').trim()||undefined});}); setListPaste(''); };
+      return (
+        <div className={\`rounded-2xl p-4 border border-white/10 \${theme.panel}\`}>
+          <div className="flex items-center gap-2 mb-3"><span>➕</span><div className="font-semibold">Быстрое добавление карточек</div></div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <input value={term} onChange={e=>setTerm(e.target.value)} placeholder="Слово / фраза" className="px-3 py-3 rounded-xl bg-white/5 border border-white/10 outline-none"/>
+            <input value={translation} onChange={e=>setTranslation(e.target.value)} placeholder="Перевод" className="px-3 py-3 rounded-xl bg-white/5 border border-white/10 outline-none"/>
+            <div className="flex gap-2">
+              <input value={example} onChange={e=>setExample(e.target.value)} placeholder="Пример (опционально)" className="flex-1 px-3 py-3 rounded-xl bg-white/5 border border-white/10 outline-none"/>
+              <button onClick={add} className="px-4 py-3 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 text-sm active:scale-[.98]">Добавить</button>
+            </div>
+          </div>
+          <div className="mt-3 flex items-center gap-2 text-sm opacity-80">
+            <span className={rec.supported? '' : 'opacity-30'}>🎤</span>
+            {rec.supported ? (
+              <button onClick={rec.start} className="underline active:opacity-80">Диктовать слово</button>
+            ): (
+              <span>Распознавание речи недоступно</span>
+            )}
+          </div>
+          <div className="mt-4">
+            <textarea value={listPaste} onChange={e=>setListPaste(e.target.value)} placeholder="Пакетно: одно на строку — слово — перевод | пример" className="w-full min-h-[90px] px-3 py-2 rounded-xl bg-white/5 border border-white/10 outline-none"></textarea>
+            <div className="mt-2 flex gap-2 flex-wrap">
+              <button onClick={bulkAdd} className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 text-sm active:scale-[.98]">Добавить списком</button>
+              <ImportExport onImport={onAdd} />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function Trainer({ settings, cards, setCards, stats, setStats }){
+      const theme = THEMES[settings.theme];
+      const [answerShown,setAnswerShown]=useState(false);
+      const [idx,setIdx]=useState(0);
+      const due = useMemo(()=>{ const t=now(); return cards.filter(c=> (c.nextReview??0) <= t).sort((a,b)=> (a.deck-b.deck) || (a.updatedAt-b.updatedAt)); },[cards]);
+      const current = due[idx] || null;
+
+      useEffect(()=>{ setIdx(0); setAnswerShown(false); },[cards.length,settings.theme]);
+
+      const startXY = useRef(null);
+      function onTouchStart(e){ const t=e.touches?.[0]; if(t) startXY.current={x:t.clientX,y:t.clientY}; }
+      function onTouchEnd(e){ if(!startXY.current) return; const t=e.changedTouches?.[0]; const dx=t.clientX - startXY.current.x; if(Math.abs(dx)>50){ if(dx>0) grade('again'); else grade('good'); } startXY.current=null; }
+
+      function reveal(){ setAnswerShown(true); }
+      function tts(){ if(!current) return; ttsSpeak(current.term, settings.language); }
+
+      function grade(kind){ if(!current) return; setAnswerShown(false);
+        setCards(arr=> arr.map(c=>{ if(c.id!==current.id) return c; let deck=c.deck; let strength=c.strength||0; if(kind==='good'){deck=clamp(deck+1,0,5); strength=clamp(strength+12,0,100); successFX(settings);} if(kind==='hard'){deck=clamp(deck,0,5); strength=clamp(strength+6,0,100); successFX(settings);} if(kind==='again'){deck=clamp(deck-1,0,5); strength=clamp(strength-6,0,100); failFX(settings);} return {...c, deck, strength, successCount:c.successCount+(kind==='again'?0:1), failCount:c.failCount+(kind==='again'?1:0), updatedAt:now(), nextReview:scheduleNext(deck)} }));
+        setStats(s=> ({...s, reviewedToday:s.reviewedToday+1, learnedToday: kind!=='again'? s.learnedToday+1 : s.learnedToday }));
+        setIdx(i=> (i>=due.length-1? 0 : i+1));
+      }
+
+      // micro-surprise
+      useEffect(()=>{ if(!settings.surprisesEnabled || !current) return; if(Math.random()<.08){ const el=document.createElement('div'); el.textContent='✨'; Object.assign(el.style,{ position:'fixed', right: (10+Math.random()*60)+'px', top:(10+Math.random()*60)+'px', fontSize:(24+Math.random()*12)+'px', opacity:'0.9' }); document.body.appendChild(el); setTimeout(()=>el.remove(), 1200); } },[current, settings.surprisesEnabled]);
+
+      return (
+        <div className={\`rounded-2xl p-4 border border-white/10 \${theme.panel}\`} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+          <div className="flex items-center gap-2 mb-3">
+            <span>🔁</span>
+            <div className="font-semibold">Тренировка</div>
+            <div className="text-xs opacity-70 ml-auto">Доступно: {due.length}</div>
+          </div>
+          {current ? (
+            <div className="grid gap-4 sm:grid-cols-[1.2fr_1fr]">
+              <div className="rounded-2xl p-5 border border-white/10 bg-white/5 relative overflow-hidden">
+                <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-10 pointer-events-none"></div>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs opacity-70">Deck {current.deck} • Повторы: {current.successCount + current.failCount}</div>
+                  <button onClick={tts} className="px-2 py-1 rounded-lg bg-white/10 border border-white/10 text-xs active:scale-[.98]">▶ Озвучить</button>
+                </div>
+                <div className="mt-5 text-2xl sm:text-3xl font-bold break-words">{current.term}</div>
+                {answerShown && (
+                  <div className="mt-3">
+                    <div className="text-lg font-semibold break-words">{current.translation}</div>
+                    {current.example && <div className="mt-2 text-sm opacity-80 break-words">{current.example}</div>}
+                  </div>
+                )}
+                {!answerShown ? (
+                  <button onClick={reveal} className="mt-5 w-full px-4 py-3 rounded-xl bg-white/10 hover:bg-white/20 border border-white/10 active:scale-[.99]">Показать ответ</button>
+                ) : (
+                  <div className="mt-4 grid grid-cols-3 gap-2">
+                    <button onClick={()=>grade('again')} className="px-3 py-3 rounded-xl bg-white/5 border border-white/10 active:scale-[.99]">✖️ Снова</button>
+                    <button onClick={()=>grade('hard')} className="px-3 py-3 rounded-xl bg-white/5 border border-white/10 active:scale-[.99]">🤔 Трудно</button>
+                    <button onClick={()=>grade('good')} className="px-3 py-3 rounded-xl bg-white/10 border border-white/10 active:scale-[.99]">✅ Знаю</button>
+                  </div>
+                )}
+                <div className="mt-3 text-[11px] opacity-60">Жесты: свайп вправо — Снова, влево — Знаю</div>
+              </div>
+
+              <div className="grid gap-4">
+                <Mascot settings={settings} stats={stats} />
+                <NeuralMap settings={settings} cards={cards} />
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl p-5 border border-white/10 bg-white/5 text-center">
+              <div className="text-base font-semibold">Нет карточек к повторению</div>
+              <div className="mt-1 opacity-70 text-sm">Добавь слова или подожди времени повторов.</div>
+            </div>
+          )}
+        </div>
+      )
+    }
+
+    function Library({ settings, cards, setCards }){
+      const theme = THEMES[settings.theme];
+      const [q,setQ]=useState('');
+      const filtered = useMemo(()=>{ const s=q.trim().toLowerCase(); if(!s) return cards; return cards.filter(c=> c.term.toLowerCase().includes(s) || c.translation.toLowerCase().includes(s)); },[cards,q]);
+      const remove = (id)=> setCards(arr=> arr.filter(c=> c.id!==id));
+      return (
+        <div className={\`rounded-2xl p-4 border border-white/10 \${theme.panel}\`}>
+          <div className="flex items-center gap-2 mb-3">
+            <span>🏆</span>
+            <div className="font-semibold">Библиотека ({cards.length})</div>
+            <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Поиск" className="ml-auto px-3 py-2 rounded-xl bg-white/5 border border-white/10 outline-none w-40"/>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filtered.map(c=> (
+              <div key={c.id} className="rounded-2xl p-3 bg-white/5 border border-white/10">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="font-semibold break-words mr-2">{c.term}</div>
+                  <div className="opacity-60 whitespace-nowrap">Deck {c.deck}</div>
+                </div>
+                <div className="opacity-90 break-words">{c.translation}</div>
+                {c.example && <div className="text-xs opacity-60 mt-1 break-words">{c.example}</div>}
+                <div className="mt-2 text-xs opacity-60">Сила: {c.strength} • След.: {new Date(c.nextReview).toLocaleDateString()}</div>
+                <div className="mt-2 flex gap-2">
+                  <button onClick={()=>ttsSpeak(c.term)} className="px-2 py-1 rounded-lg bg-white/10 border border-white/10 text-xs active:scale-[.98]">▶ Озвуч</button>
+                  <button onClick={()=>remove(c.id)} className="px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-xs active:scale-[.98]">Удалить</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )
+    }
+
+    function FooterNote(){
+      return <div className="text-center opacity-60 text-[11px] py-6">NeuroLing • DFLS Mobile MVP • v0.2 — локальное хранение (экспорт/импорт поддерживается)</div>;
+    }
+
+    function App(){
+      const [cards,setCards]=useCards();
+      const [settings,setSettings]=useSettings();
+      const [stats,setStats]=useStats();
+      const theme = THEMES[settings.theme];
+      function addCard({term,translation,example}){
+        const c={ id:uid(), term, translation, example, deck:0, strength:10, successCount:0, failCount:0, createdAt:now(), updatedAt:now(), nextReview:scheduleNext(0)};
+        setCards(arr=>[c,...arr]);
+      }
+      useEffect(()=>{ if(cards.length===0){ [
+        { term:'laufen', translation:'бежать', example:'Ich laufe jeden Morgen.' },
+        { term:'denken', translation:'думать', example:'Denkst du oft an die Zukunft?' },
+        { term:'sprechen', translation:'говорить', example:'Wir sprechen Deutsch.' },
+        { term:'finden', translation:'находить', example:'Ich finde den Schlüssel nicht.' },
+        { term:'genau', translation:'точно', example:'Das ist genau richtig.' },
+      ].forEach(addCard); } },[]);
+
+      return (
+        <div className={\`\${theme.bg} min-h-screen \${theme.text}\`}>
+          <Header settings={settings} setSettings={setSettings} />
+          <main className="max-w-5xl mx-auto px-3 sm:px-4 py-4 grid gap-4 sm:gap-6 lg:grid-cols-[1.4fr_1fr]">
+            <div className="grid gap-4 sm:gap-6">
+              <Trainer settings={settings} cards={cards} setCards={setCards} stats={stats} setStats={setStats} />
+              <CardCreator settings={settings} onAdd={addCard} />
+            </div>
+            <div className="grid gap-4 sm:gap-6">
+              <Library settings={settings} cards={cards} setCards={setCards} />
+            </div>
+          </main>
+          <FooterNote />
+          <div className={\`pointer-events-none fixed inset-0 opacity-[.06] bg-gradient-to-b \${theme.accentFrom} \${theme.accentTo}\`}></div>
+        </div>
+      )
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App/>);
+  </script>
+</body>
+</html>
